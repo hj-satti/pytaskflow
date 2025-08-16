@@ -1,11 +1,19 @@
 import time
 import uuid
 import threading
+import json
 
-# Simple in-memory task queue
-TASK_QUEUE = []
-# Function registry
-FUNCTIONS = {}
+from db import (
+    init as db_init,
+    insert_task,
+    fetch_next_pending,
+    update_result,
+    list_tasks,
+    update_status,
+)
+
+# Registry of allowed functions
+FUNCTIONS: dict[str, callable] = {}
 
 def task(fn):
     FUNCTIONS[fn.__name__] = fn
@@ -19,50 +27,47 @@ def add_numbers(a, b):
 def say_hello(name):
     return f"Hello, {name}!"
 
-def enqueue(function_name, args: dict):
+def enqueue(function_name: str, args: dict) -> str:
     if function_name not in FUNCTIONS:
         raise ValueError("Function not registered: " + function_name)
     task_id = uuid.uuid4().hex
-    TASK_QUEUE.append({
+    insert_task({
         "id": task_id,
         "function": function_name,
-        "args": args,
+        "args_json": json.dumps(args),
         "status": "PENDING",
-        "result": None,
+        "result_json": None,
         "error": None,
     })
     print(f"[ENQUEUE] id={task_id} func={function_name} args={args}")
     return task_id
 
-def worker_loop(stop_flag):
+def worker_loop(stop_flag: dict):
     while not stop_flag["stop"]:
-        task = None
-        for t in TASK_QUEUE:
-            if t["status"] == "PENDING":
-                task = t
-                break
-        if not task:
-            time.sleep(0.2)
+        task_row = fetch_next_pending()
+        if not task_row:
+            time.sleep(0.25)
             continue
-        task["status"] = "RUNNING"
-        fn = FUNCTIONS[task["function"]]
+        update_status(task_row["id"], "RUNNING")
+        fn = FUNCTIONS[task_row["function"]]
         try:
-            result = fn(**task["args"])
-            task["result"] = result
-            task["status"] = "SUCCESS"
-            print(f"[SUCCESS] {task['id']} result={result}")
+            args = json.loads(task_row["args_json"])
+            result = fn(**args)
+            update_result(task_row["id"], "SUCCESS", json.dumps(result), None)
+            print(f"[SUCCESS] {task_row['id']} result={result}")
         except Exception as e:
-            task["error"] = str(e)
-            task["status"] = "FAILED"
-            print(f"[FAILED] {task['id']} error={e}")
+            update_result(task_row["id"], "FAILED", None, str(e))
+            print(f"[FAILED] {task_row['id']} error={e}")
 
 def start_worker():
-    stop_flag = {"stop": False}
+    stop_flag: dict[str, bool] = {"stop": False}
     thread = threading.Thread(target=worker_loop, args=(stop_flag,), daemon=True)
     thread.start()
     return stop_flag, thread
 
 if __name__ == "__main__":
+    db_init()
+
     stop_flag, thread = start_worker()
 
     enqueue("add_numbers", {"a": 2, "b": 5})
@@ -71,8 +76,8 @@ if __name__ == "__main__":
 
     time.sleep(2)
 
-    print("\nFINAL TASK STATES:")
-    for t in TASK_QUEUE:
+    print("\nFINAL TASK STATES (from DB):")
+    for t in list_tasks():
         print(t)
 
     stop_flag["stop"] = True
